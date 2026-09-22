@@ -1,75 +1,157 @@
 """
-Storage for the execution bot — SQLite.
+Storage for the execution bot — Supabase PostgreSQL.
 Tracks open positions, closed trades, daily stats.
 """
 
 import os
 import json
-import sqlite3
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, List, Dict, Any
 from threading import Lock
+from contextlib import contextmanager
 
-from config import DB_PATH
+from config import DATABASE_URL, USE_POSTGRES
 
 logger = logging.getLogger(__name__)
 
 
+# ======================================================================
+# PostgreSQL
+# ======================================================================
+_psycopg2 = None
+if USE_POSTGRES:
+    try:
+        import psycopg2
+        import psycopg2.extras
+        from psycopg2 import pool as pg_pool
+        _psycopg2 = psycopg2
+        logger.info("Execution bot storage: PostgreSQL (Supabase)")
+    except BaseException as e:
+        logger.error(f"psycopg2 failed: {e}. Execution bot requires PostgreSQL.")
+        raise
+
+
+_pool = None
+_pool_lock = Lock()
+
+
+def _get_pool():
+    global _pool
+    if _pool is None:
+        with _pool_lock:
+            if _pool is None:
+                _pool = pg_pool.SimpleConnectionPool(
+                    minconn=1, maxconn=5,
+                    dsn=DATABASE_URL,
+                    connect_timeout=10,
+                )
+                logger.info("Execution bot PG pool created")
+    return _pool
+
+
+class _PgConn:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql: str, params: tuple = ()):
+        sql = sql.replace('?', '%s')
+        cur = self._conn.cursor(cursor_factory=_psycopg2.extras.RealDictCursor)
+        cur.execute(sql, params)
+        return cur
+
+    def executescript(self, script: str):
+        cur = self._conn.cursor()
+        for stmt in script.split(';'):
+            stmt = stmt.strip()
+            if stmt:
+                cur.execute(stmt)
+        self._conn.commit()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        try:
+            self._conn.commit()
+        except Exception:
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+
+
+@contextmanager
 def _conn():
-    c = sqlite3.connect(DB_PATH, timeout=10.0)
-    c.row_factory = sqlite3.Row
-    return c
+    p = _get_pool()
+    conn = p.getconn()
+    try:
+        yield _PgConn(conn)
+        try:
+            conn.commit()
+        except Exception:
+            pass
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            p.putconn(conn)
+        except Exception:
+            pass
 
 
+# ======================================================================
+# DDL
+# ======================================================================
 def init_db():
     with _conn() as c:
         c.executescript("""
             CREATE TABLE IF NOT EXISTS positions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 symbol TEXT NOT NULL,
-                side TEXT NOT NULL,                    -- 'long' or 'short'
-                status TEXT NOT NULL,                  -- 'open' or 'closed'
-                entry_price REAL NOT NULL,
-                quantity REAL NOT NULL,
-                notional_usd REAL NOT NULL,
+                side TEXT NOT NULL,
+                status TEXT NOT NULL,
+                entry_price DOUBLE PRECISION NOT NULL,
+                quantity DOUBLE PRECISION NOT NULL,
+                notional_usd DOUBLE PRECISION NOT NULL,
                 leverage INTEGER NOT NULL,
-                margin_usd REAL NOT NULL,
-                stop_loss REAL,
-                take_profit REAL,
+                margin_usd DOUBLE PRECISION NOT NULL,
+                stop_loss DOUBLE PRECISION,
+                take_profit DOUBLE PRECISION,
                 signal_type TEXT,
-                signal_score REAL,
-                signal_confidence REAL,
+                signal_score DOUBLE PRECISION,
+                signal_confidence DOUBLE PRECISION,
                 signal_id INTEGER,
-                -- exit info
-                exit_price REAL,
+                exit_price DOUBLE PRECISION,
                 exit_reason TEXT,
-                pnl_usd REAL,
-                pnl_pct REAL,
+                pnl_usd DOUBLE PRECISION,
+                pnl_pct DOUBLE PRECISION,
                 opened_at TEXT NOT NULL,
                 closed_at TEXT,
-                -- exchange info
                 exchange_order_id TEXT,
                 sl_order_id TEXT,
                 tp_order_id TEXT,
                 paper INTEGER DEFAULT 1
             );
-            CREATE INDEX IF NOT EXISTS idx_positions_status
-                ON positions(status);
-            CREATE INDEX IF NOT EXISTS idx_positions_symbol
-                ON positions(symbol);
+
+            CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
+            CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol);
 
             CREATE TABLE IF NOT EXISTS daily_stats (
                 date TEXT PRIMARY KEY,
                 trades_opened INTEGER DEFAULT 0,
                 trades_closed INTEGER DEFAULT 0,
-                realized_pnl REAL DEFAULT 0,
+                realized_pnl DOUBLE PRECISION DEFAULT 0,
                 wins INTEGER DEFAULT 0,
                 losses INTEGER DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS webhook_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 received_at TEXT NOT NULL,
                 event TEXT,
                 symbol TEXT,
@@ -78,7 +160,7 @@ def init_db():
                 reason TEXT
             );
         """)
-    logger.info(f"Storage initialized at {DB_PATH}")
+    logger.info("Execution bot storage initialized")
 
 
 # ======================================================================
@@ -108,6 +190,7 @@ class PositionStore:
                      signal_type, signal_score, signal_confidence, signal_id,
                      opened_at, exchange_order_id, sl_order_id, tp_order_id, paper)
                 VALUES (?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                RETURNING id
             """, (
                 symbol, side, entry_price, quantity, notional_usd,
                 leverage, margin_usd, stop_loss, take_profit,
@@ -116,7 +199,8 @@ class PositionStore:
                 exchange_order_id, sl_order_id, tp_order_id,
                 1 if paper else 0,
             ))
-            return cur.lastrowid
+            row = cur.fetchone()
+            return int(row['id'])
 
     @staticmethod
     def close_position(position_id: int, exit_price: float,
@@ -187,11 +271,11 @@ class PositionStore:
                 INSERT INTO daily_stats (date, trades_opened, trades_closed, realized_pnl, wins, losses)
                 VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(date) DO UPDATE SET
-                    trades_opened = trades_opened + excluded.trades_opened,
-                    trades_closed = trades_closed + excluded.trades_closed,
-                    realized_pnl = realized_pnl + excluded.realized_pnl,
-                    wins = wins + excluded.wins,
-                    losses = losses + excluded.losses
+                    trades_opened = daily_stats.trades_opened + EXCLUDED.trades_opened,
+                    trades_closed = daily_stats.trades_closed + EXCLUDED.trades_closed,
+                    realized_pnl = daily_stats.realized_pnl + EXCLUDED.realized_pnl,
+                    wins = daily_stats.wins + EXCLUDED.wins,
+                    losses = daily_stats.losses + EXCLUDED.losses
             """, (
                 today, opened, closed, pnl_delta,
                 1 if is_win is True else 0,
@@ -199,9 +283,6 @@ class PositionStore:
             ))
 
 
-# ======================================================================
-# Webhook log
-# ======================================================================
 def log_webhook(event: str, symbol: str, payload: dict,
                 action: str, reason: str = ''):
     try:
