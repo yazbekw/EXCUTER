@@ -29,24 +29,30 @@ def _env_int(key: str, default: int) -> int:
 
 
 # ======================================================================
+# Database — separate Supabase project
+# ======================================================================
+DATABASE_URL = _env('DATABASE_URL', '').strip()
+USE_POSTGRES = DATABASE_URL.startswith(('postgres://', 'postgresql://'))
+
+# ======================================================================
 # Binance Futures credentials
 # ======================================================================
 BINANCE_API_KEY = _env('BINANCE_API_KEY', '')
 BINANCE_API_SECRET = _env('BINANCE_API_SECRET', '')
-BINANCE_TESTNET = _env_bool('BINANCE_TESTNET', False)  # testnet for testing
+BINANCE_TESTNET = _env_bool('BINANCE_TESTNET', False)
 
 # ======================================================================
 # Execution mode
 # ======================================================================
-PAPER_TRADING = _env_bool('PAPER_TRADING', True)   # ← مهم: افتراضي = ورق
+PAPER_TRADING = _env_bool('PAPER_TRADING', True)
 LEVERAGE = _env_int('LEVERAGE', 20)
-POSITION_SIZE_USD = _env_float('POSITION_SIZE_USD', 5.0)   # الهامش لكل صفقة
+POSITION_SIZE_USD = _env_float('POSITION_SIZE_USD', 5.0)
 MAX_CONCURRENT_POSITIONS = _env_int('MAX_CONCURRENT_POSITIONS', 1)
 
 # ======================================================================
 # Webhook security
 # ======================================================================
-SHARED_SECRET = _env('EXECUTION_BOT_SECRET', '')   # يجب أن يطابق EXTERNAL_BOT_SECRET في المحلل
+SHARED_SECRET = _env('EXECUTION_BOT_SECRET', '')
 
 # ======================================================================
 # Notifications
@@ -59,16 +65,8 @@ NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
 # ======================================================================
 MAX_DAILY_LOSS_USD = _env_float('MAX_DAILY_LOSS_USD', 20.0)
 MAX_DAILY_TRADES = _env_int('MAX_DAILY_TRADES', 20)
-MIN_CONFIDENCE = _env_float('MIN_CONFIDENCE', 30.0)   # النسبة المئوية الدنيا
-MAX_SLIPPAGE_PCT = _env_float('MAX_SLIPPAGE_PCT', 0.5)  # 0.5%
-
-# ======================================================================
-# Storage
-# ======================================================================
-DATA_DIR = _env('DATA_DIR', '/data')
-if not os.path.isdir(DATA_DIR):
-    DATA_DIR = '.'
-DB_PATH = os.path.join(DATA_DIR, 'execution.db')
+MIN_CONFIDENCE = _env_float('MIN_CONFIDENCE', 30.0)
+MAX_SLIPPAGE_PCT = _env_float('MAX_SLIPPAGE_PCT', 0.5)
 
 # ======================================================================
 # Server
@@ -77,11 +75,10 @@ PORT = _env_int('PORT', 5001)
 LOG_LEVEL = _env('LOG_LEVEL', 'INFO').upper()
 
 
-# ======================================================================
-# Validation
-# ======================================================================
 def validate():
     errors = []
+    if not USE_POSTGRES:
+        errors.append('DATABASE_URL is required (Supabase project for execution bot)')
     if not PAPER_TRADING:
         if not BINANCE_API_KEY:
             errors.append('BINANCE_API_KEY is required for live trading')
