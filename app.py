@@ -21,6 +21,7 @@ from config import SHARED_SECRET, PAPER_TRADING, PORT, LOG_LEVEL, LEVERAGE, POSI
 from storage import init_db, PositionStore, log_webhook
 from position_manager import handle_entry, handle_exit, close_all
 from notifier import notify_system
+from dashboard import register_dashboard
 
 # ======================================================================
 # Logging
@@ -36,6 +37,7 @@ logger = logging.getLogger(__name__)
 # Flask app
 # ======================================================================
 app = Flask(__name__)
+register_dashboard(app)
 
 
 # ======================================================================
