@@ -119,7 +119,12 @@ def health():
         'today': PositionStore.get_today_stats(),
         'timestamp': datetime.now().isoformat(),
     })
-
+  
+@app.route('/api/close_all_browser', methods=['GET'])
+def close_all_browser():
+    """Browser-friendly close_all — GET instead of POST."""
+    result = close_all('manual')
+    return jsonify(result)
 
 @app.route('/api/positions', methods=['GET'])
 def positions():
